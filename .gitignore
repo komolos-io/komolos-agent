@@ -1,0 +1,5 @@
+/komolos-agent
+*.exe
+dist/
+# Output describes an environment: never commit it
+inventory-*.json

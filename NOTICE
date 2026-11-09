@@ -1,0 +1,5 @@
+komolos-agent
+Copyright 2026 The komolos authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+It uses the AWS SDK for Go v2, also licensed under the Apache License 2.0.

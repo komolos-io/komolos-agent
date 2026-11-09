@@ -1,0 +1,68 @@
+# Release komolos-agent for Linux, macOS and Windows from one tag push.
+#   git tag v0.1.0 && git push origin v0.1.0
+# The release workflow (.github/workflows/release.yml) runs GoReleaser, which
+# cross-compiles, writes checksums.txt, signs it with cosign (keyless, via
+# GitHub's OIDC identity) and publishes the GitHub Release that
+# install.sh downloads from.
+version: 2
+project_name: komolos-agent
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: komolos-agent
+    main: .
+    binary: komolos-agent
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: komolos-agent
+    # No version in the name, so .../releases/latest/download/<name> always works.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - src: komolos-discover.sh
+        strip_parent: true
+      - src: aws-iam-policy.json
+        strip_parent: true
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", --yes]
+
+sboms:
+  - artifacts: archive
+
+release:
+  github:
+    owner: komolos-io
+    name: komolos-agent
+  extra_files:
+    - glob: install.sh
+    - glob: install.ps1
+    - glob: komolos-discover.sh
+    - glob: aws-iam-policy.json
+
+changelog:
+  use: github

@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.2",
+  "collector_version": "v0.0.0-sample",
+  "provider": "aws",
+  "collected_at": "2026-11-09T10:00:00Z",
+  "aws": {
+    "account_id": "123456789012",
+    "caller_arn": "arn:aws:sts::123456789012:assumed-role/readonly/sample",
+    "regions": []
+  },
+  "gaps": []
+}

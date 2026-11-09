@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "KomolosCollectReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeFlowLogs",
+        "ec2:DescribeInstances",
+        "ec2:DescribeVolumes",
+        "eks:ListClusters",
+        "eks:DescribeCluster",
+        "ecs:ListClusters",
+        "ecs:DescribeClusters"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
