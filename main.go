@@ -1,7 +1,8 @@
 // komolos-agent is the customer-side komolos binary. What it does is chosen by
-// a mode flag; today that is --collect, which inventories an environment (an
-// AWS account, or Linux servers anywhere) into one JSON file for migration
-// planning.
+// a mode flag: --collect inventories an environment (an AWS account, or Linux
+// servers anywhere) into one JSON file, read-only; --migrate k8s moves a
+// Kubernetes namespace to another cluster, reading the source and writing only
+// to the destination you name.
 //
 // Every mode runs once and exits. Despite the name there is nothing to install
 // on the machine that runs it: no service, no background process, no telemetry,
@@ -13,6 +14,7 @@
 //	komolos-agent --collect ssh --targets hosts.txt    # Linux servers over SSH
 //	komolos-agent --upload -f inventory-aws.json       # optional, after review
 //	komolos-agent --print-wrapper > komolos-discover   # script for target servers
+//	komolos-agent --migrate k8s --from eks-prod --to lagos -n shop
 package main
 
 import (
@@ -32,6 +34,7 @@ import (
 	"github.com/komolos-io/komolos-agent/internal/inventory"
 	awsinv "github.com/komolos-io/komolos-agent/internal/providers/aws"
 	sshhost "github.com/komolos-io/komolos-agent/internal/providers/ssh"
+	"github.com/komolos-io/komolos-agent/internal/ui"
 	"github.com/komolos-io/komolos-agent/internal/upload"
 )
 
@@ -55,6 +58,11 @@ Usage:
   komolos-agent --plan aws [--policy]           show the API calls (or IAM policy); runs nothing
   komolos-agent --plan ssh (--targets FILE | --host H ...) [options]
                                                 show the exact ssh commands; runs nothing
+  komolos-agent --plan k8s --from CTX --to CTX -n NAMESPACE
+                                                show what a migration would move; changes nothing
+  komolos-agent --migrate k8s --from CTX --to CTX -n NAMESPACE [options]
+                                                move a namespace (config, secrets, workloads, volume data)
+                                                to another cluster; the source is only read
   komolos-agent --upload -f FILE [--endpoint URL] [--token-file FILE] [--yes]
   komolos-agent --print-wrapper                 the script target servers run
   komolos-agent --version
@@ -74,11 +82,19 @@ func splitMode(args []string) (mode, target string, rest []string, err error) {
 	mode, target, hasValue := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
 	rest = args[1:]
 	switch mode {
-	case "collect", "plan":
+	case "collect", "plan", "migrate":
 		if !hasValue && len(rest) > 0 {
 			target, rest = rest[0], rest[1:]
 		}
-		if target != "aws" && target != "ssh" {
+		switch {
+		case mode == "collect" && (target == "aws" || target == "ssh"):
+		case mode == "plan" && (target == "aws" || target == "ssh" || target == "k8s"):
+		case mode == "migrate" && target == "k8s":
+		case mode == "migrate":
+			return "", "", nil, errors.New("--migrate needs a target: k8s")
+		case mode == "plan":
+			return "", "", nil, errors.New("--plan needs a target: aws, ssh or k8s")
+		default:
 			return "", "", nil, fmt.Errorf("--%s needs a target: aws or ssh", mode)
 		}
 	case "upload", "print-wrapper", "version", "v", "help", "h":
@@ -108,7 +124,13 @@ func main() {
 			err = runSSH(ctx, rest)
 		}
 	case "plan":
-		err = runPlan(append([]string{target}, rest...))
+		if target == "k8s" {
+			err = runMigrate(ctx, rest, true, os.Stdin)
+		} else {
+			err = runPlan(append([]string{target}, rest...))
+		}
+	case "migrate":
+		err = runMigrate(ctx, rest, false, os.Stdin)
 	case "upload":
 		err = runUpload(ctx, rest, os.Stdin)
 	case "print-wrapper":
@@ -122,7 +144,13 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
-		fmt.Fprintln(os.Stderr, "error:", err)
+		var shown errReported
+		if !errors.As(err, &shown) && !errors.Is(err, errIssues) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+		if errors.Is(err, errIssues) {
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }
@@ -138,10 +166,59 @@ func finish(inv *inventory.Inventory, path string) error {
 	if err := inventory.WriteFile(path, inv); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "\nWrote %s\n", path)
-	inventory.Summary(os.Stderr, inv)
-	fmt.Fprintf(os.Stderr, "\nReview the file before uploading. Nothing has been sent.\nWhen ready: komolos-agent --upload -f %s\n", path)
+	u := ui.New(os.Stderr)
+	u.Section("Inventory")
+	if inv.AWS != nil {
+		for _, r := range inv.AWS.Regions {
+			u.Row(ui.Item, r.Region, fmt.Sprintf("%d instances  ·  %d volumes  ·  %d VPCs  ·  %d clusters",
+				len(r.Compute.Instances), len(r.Compute.Volumes), len(r.Network.VPCs), len(r.Compute.EKSClusters)+len(r.Compute.ECSClusters)))
+		}
+	}
+	for _, h := range inv.Hosts {
+		desc := h.OS.PrettyName
+		if desc == "" {
+			desc = "unreachable"
+		}
+		u.Row(ui.Item, h.Address, fmt.Sprintf("%s  ·  %d services  ·  %d listening ports", desc, len(h.Services), len(h.Listeners)))
+	}
+	if len(inv.Gaps) > 0 {
+		u.Blank()
+		const show = 6
+		for i, g := range inv.Gaps {
+			if i == show {
+				u.Text(fmt.Sprintf("   … %d more gaps listed in the file", len(inv.Gaps)-show))
+				break
+			}
+			u.Row(ui.Warn, strings.TrimPrefix(strings.TrimPrefix(g.Scope, "aws:"), "host:"), humanGap(g.Area, g.Code))
+		}
+	}
+	u.Section("Saved")
+	u.Row(ui.OK, "File", path)
+	u.Text("Nothing was sent. Review the file, then: komolos-agent --upload -f " + path)
+	u.Blank()
 	return nil
+}
+
+// hostCounter turns the SSH collector's per-host progress lines into a live
+// "n of total hosts" status.
+type hostCounter struct {
+	live  *ui.Live
+	total int
+	n     int
+}
+
+func (h *hostCounter) Write(b []byte) (int, error) {
+	h.n += strings.Count(string(b), "\n")
+	h.live.Set(fmt.Sprintf("%d of %d hosts", h.n, h.total))
+	return len(b), nil
+}
+
+func firstLineOf(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func splitList(s string) []string {
@@ -162,11 +239,25 @@ func runAWS(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "Collecting AWS inventory (read-only Describe/List calls)...")
-	awsInv, gaps, err := awsinv.Collect(ctx, awsinv.Options{Profile: *profile, Regions: splitList(*regions), Log: os.Stderr})
-	if err != nil {
-		return err
+	u := ui.New(os.Stderr)
+	u.Banner("AWS inventory", version)
+	where := *regions
+	if where == "" {
+		where = "profile default"
 	}
+	if *profile != "" {
+		u.KV("Profile", *profile, "")
+	}
+	u.KV("Regions", where, "read only")
+	u.Blank()
+	l := u.Start("Collecting", "Describe and List calls")
+	awsInv, gaps, err := awsinv.Collect(ctx, awsinv.Options{Profile: *profile, Regions: splitList(*regions)})
+	if err != nil {
+		l.Done(ui.Fail, firstLineOf(err))
+		u.Blank()
+		return errReported{err}
+	}
+	l.Done(ui.OK, "account "+awsInv.AccountID)
 	inv := newInventory("aws")
 	inv.AWS = awsInv
 	inv.Gaps = append(inv.Gaps, gaps...)
@@ -239,8 +330,13 @@ func runSSH(ctx context.Context, args []string) error {
 	if err := sshhost.LookPath(o.cfg.SSHBinary); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Inventorying %d host(s) through komolos-discover...\n", len(o.targets))
-	found, gaps := sshhost.Collect(ctx, o.cfg, o.targets, os.Stderr)
+	u := ui.New(os.Stderr)
+	u.Banner("Server inventory", version)
+	u.KV("Hosts", fmt.Sprint(len(o.targets)), "read only, through komolos-discover")
+	u.Blank()
+	l := u.Start("Collecting", fmt.Sprintf("0 of %d hosts", len(o.targets)))
+	found, gaps := sshhost.Collect(ctx, o.cfg, o.targets, &hostCounter{live: l, total: len(o.targets)})
+	l.Done(ui.OK, fmt.Sprintf("%d hosts", len(o.targets)))
 	inv := newInventory("ssh")
 	inv.Hosts = found
 	inv.Gaps = append(inv.Gaps, gaps...)
@@ -356,4 +452,31 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// humanGap says in plain words what could not be collected. The file keeps
+// the exact codes.
+func humanGap(area, code string) string {
+	area = strings.ReplaceAll(area, "_", " ")
+	switch {
+	case strings.HasPrefix(code, "unavailable:"):
+		return area + " not available on this host"
+	case strings.HasPrefix(code, "exit_"):
+		return area + " could not be read"
+	case code == "missing" || code == "truncated":
+		return area + " incomplete"
+	case code == "UnauthorizedOperation" || code == "AccessDenied" || code == "AccessDeniedException":
+		return area + ": no permission"
+	case code == "auth_failed":
+		return "SSH sign-in refused"
+	case code == "host_key_unverified":
+		return "host key not trusted (check known_hosts)"
+	case code == "timeout" || code == "connect_timeout":
+		return "timed out"
+	case code == "refused":
+		return "komolos-discover refused the request"
+	case code == "connection_refused" || code == "unreachable" || code == "dns_failed":
+		return "could not connect"
+	}
+	return area + ": " + strings.ReplaceAll(code, "_", " ")
 }

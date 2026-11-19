@@ -21,6 +21,10 @@ Of particular interest:
 - any way to make `komolos-discover.sh` run something other than its fixed
   read-only commands;
 - secrets or application data reaching the inventory file;
+- any way for `--migrate k8s` to modify the source cluster (every source
+  command must pass `sourceGuard` in `internal/migrate/k8s/kubectl.go`), to
+  write outside the destination namespace, or to leak the migration bundle,
+  which contains the namespace's Secrets;
 - weaknesses in release signing or installer verification.
 
 ## Supported versions

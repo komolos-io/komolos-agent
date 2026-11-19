@@ -21,10 +21,40 @@ set -eu
 REPO="komolos-io/komolos-agent"
 BIN="komolos-agent"
 
+# Colour only on an interactive terminal, and never with NO_COLOR set.
+if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+	C_OK=$(printf '\033[38;5;42;1m') C_BAD=$(printf '\033[38;5;203;1m')
+	C_DIM=$(printf '\033[2m') C_AQUA=$(printf '\033[38;5;44m') C_OFF=$(printf '\033[0m')
+else
+	C_OK='' C_BAD='' C_DIM='' C_AQUA='' C_OFF=''
+fi
 say() { printf '%s\n' "$*" >&2; }
+MARK_OK='+'
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *UTF-8* | *utf-8* | *utf8*) MARK_OK='✓' ;; esac
+row() { # mark label value
+	case $1 in ok) m="${C_OK}${MARK_OK}${C_OFF}" ;; skip) m="${C_DIM}-${C_OFF}" ;; *) m="${C_BAD}x${C_OFF}" ;; esac
+	printf '  %s  %-14s%s%s%s\n' "$m" "$2" "$C_DIM" "$3" "$C_OFF" >&2
+}
 fail() {
-	say "komolos install: $*"
+	printf '  %sx komolos install: %s%s\n' "$C_BAD" "$*" "$C_OFF" >&2
 	exit 1
+}
+banner() {
+	[ -t 2 ] || return 0
+	i=0
+	printf '\n' >&2
+	while IFS= read -r l; do
+		shade=$(printf '23\n30\n37\n44\n51' | sed -n "$((i + 1))p")
+		if [ -n "$C_OFF" ]; then printf '  \033[38;5;%s;1m%s\033[0m\n' "$shade" "$l" >&2; else printf '  %s\n' "$l" >&2; fi
+		i=$((i + 1))
+	done <<'ART'
+    __ ______  __  _______  __    ____  _____
+   / //_/ __ \/  |/  / __ \/ /   / __ \/ ___/
+  / ,< / / / / /|_/ / / / / /   / / / /\__ \
+ / /| / /_/ / /  / / /_/ / /___/ /_/ /___/ /
+/_/ |_\____/_/  /_/\____/_____/\____//____/
+ART
+	printf '\n  %skomolos-agent installer%s\n\n' "$(printf '\033[1m')" "$C_OFF" >&2
 }
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -85,9 +115,10 @@ main() {
 	tmp=$(mktemp -d 2>/dev/null || mktemp -d -t komolos)
 	trap 'rm -rf "$tmp"' EXIT INT TERM
 
-	say "Downloading $archive ($version)..."
+	banner
 	fetch "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
 	fetch "$base/checksums.txt" "$tmp/checksums.txt" || fail "could not download checksums.txt"
+	row ok Downloaded "$archive ($version)"
 
 	if have cosign; then
 		fetch "$base/checksums.txt.sigstore.json" "$tmp/checksums.txt.sigstore.json" ||
@@ -97,16 +128,16 @@ main() {
 			--certificate-oidc-issuer https://token.actions.githubusercontent.com \
 			--certificate-identity-regexp "^https://github.com/$REPO/\.github/workflows/release\.yml@refs/tags/v" \
 			"$tmp/checksums.txt" >/dev/null 2>&1 || fail "signature check FAILED for checksums.txt; nothing installed"
-		say "Signature verified (cosign, GitHub Actions release workflow)."
+		row ok Signature "signed by the $REPO release workflow"
 	else
-		say "cosign not found: checking the SHA-256 only. Install cosign to also verify the signature."
+		row skip Signature "not checked (install cosign to check it)"
 	fi
 
 	want=$(awk -v f="$archive" '$2 == f {print $1}' "$tmp/checksums.txt")
 	[ -n "$want" ] || fail "$archive is not listed in checksums.txt"
 	got=$(sha256_of "$tmp/$archive")
 	[ "$want" = "$got" ] || fail "checksum mismatch for $archive (want $want, got $got); nothing installed"
-	say "Checksum verified."
+	row ok Checksum "matches checksums.txt"
 
 	tar -xzf "$tmp/$archive" -C "$tmp" "$BIN" || fail "could not unpack $archive"
 
@@ -123,13 +154,14 @@ main() {
 	chmod 0755 "$dir/.$BIN.new"
 	mv -f "$dir/.$BIN.new" "$dir/$BIN"
 
-	say "Installed $dir/$BIN"
+	row ok Installed "$dir/$BIN"
+	say ""
 	case ":$PATH:" in
 	*":$dir:"*) ;;
-	*) say "Add it to your PATH:  export PATH=\"$dir:\$PATH\"" ;;
+	*) say "  ${C_DIM}Add to PATH${C_OFF}  export PATH=\"$dir:\$PATH\"" ;;
 	esac
-	"$dir/$BIN" version >&2 || true
-	say "Next: $BIN aws --region <region>   or   $BIN ssh --targets hosts.txt"
+	say "  ${C_DIM}Try${C_OFF}  ${C_AQUA}$BIN --help${C_OFF}"
+	say ""
 }
 
 main "$@"

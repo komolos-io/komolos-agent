@@ -3,3 +3,6 @@
 dist/
 # Output describes an environment: never commit it
 inventory-*.json
+# Migration bundles contain the namespace's Secrets: never commit them
+komolos-migration-*/
+last-migration/

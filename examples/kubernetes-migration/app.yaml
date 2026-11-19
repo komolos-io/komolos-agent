@@ -1,0 +1,101 @@
+# A small "shop" app for the migration demo: a web server whose site content
+# lives on a persistent volume, plus configuration and a secret. Moving it
+# shows every part of a migration: config, secrets, services, workloads and
+# volume data.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    team: storefront
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: shop
+data:
+  default.conf: |
+    server {
+      listen 80;
+      root /usr/share/nginx/html;
+      add_header X-Served-By $hostname;
+      location /healthz { return 200 "ok\n"; }
+    }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: payment-keys
+  namespace: shop
+type: Opaque
+stringData:
+  PAYSTACK_SECRET: sk_test_demo_only
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: site-content
+  namespace: shop
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: shop
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: PAYSTACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: payment-keys
+                  key: PAYSTACK_SECRET
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+          volumeMounts:
+            - name: content
+              mountPath: /usr/share/nginx/html
+            - name: config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: site-content
+        - name: config
+          configMap:
+            name: web-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: shop
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 80

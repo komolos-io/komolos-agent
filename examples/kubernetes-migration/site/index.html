@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adire House: online store</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f6f5f2; color: #1c1c1c; }
+  header { background: #12355b; color: #fff; padding: 28px 40px; }
+  header h1 { margin: 0; font-size: 28px; }
+  header p { margin: 6px 0 0; opacity: .8; }
+  main { padding: 32px 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; }
+  .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .card img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; }
+  .price { font-weight: 600; margin-top: 6px; }
+  .receipt { margin-top: 32px; padding: 16px; background: #fff; border-left: 4px solid #12355b; font-family: ui-monospace, monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Adire House</h1>
+  <p>Hand-dyed textiles from Abeokuta. A sample app for the komolos migration demo.</p>
+</header>
+<main>
+  <div class="grid">
+    <div class="card"><img src="img/indigo.svg" alt=""><div>Indigo adire, 2 yards</div><div class="price">₦18,500</div></div>
+    <div class="card"><img src="img/kampala.svg" alt=""><div>Kampala wax print, 6 yards</div><div class="price">₦32,000</div></div>
+    <div class="card"><img src="img/aso-oke.svg" alt=""><div>Aso-oke gele</div><div class="price">₦24,000</div></div>
+  </div>
+  <h3>Data on this volume</h3>
+  <div class="receipt" id="receipt">loading…</div>
+</main>
+<script>
+  fetch('orders.txt').then(r => r.text()).then(t => document.getElementById('receipt').textContent = t)
+    .catch(() => document.getElementById('receipt').textContent = 'orders.txt not found');
+</script>
+</body>
+</html>

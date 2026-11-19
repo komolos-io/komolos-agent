@@ -1,9 +1,16 @@
 # komolos-agent
 
-A read-only, touch-and-go inventory tool. Point it at an AWS account or a set
-of Linux servers; it writes one JSON file describing what runs there (servers,
-networks, volumes, clusters, listening services, which hosts talk to which) and
-exits. You read the file and decide what to do with it.
+A touch-and-go tool for moving to a new environment. It has two jobs, each a
+separate mode that runs once and exits:
+
+- **`--collect`**: read-only inventory. Point it at an AWS account or a set of
+  Linux servers; it writes one JSON file describing what runs there (servers,
+  networks, volumes, clusters, listening services, which hosts talk to which).
+  You read the file and decide what to do with it.
+- **`--migrate k8s`**: moves a Kubernetes namespace (configuration, secrets,
+  services, workloads and the data on their volumes) to another cluster. It
+  only reads the source and writes only to the destination you name. See
+  [Migrating a Kubernetes namespace](#migrating-a-kubernetes-namespace).
 
 It was built for planning migrations to [komolos](https://komolos.com), but it
 needs no komolos account and the file is yours: use it for your own
@@ -15,7 +22,9 @@ or background process, and nothing stays behind except the file you asked for.
 
 ## What it does not do
 
-Security teams usually ask these first:
+Security teams usually ask these first. Everything below holds for every mode,
+except that `--migrate` writes to the destination cluster you name; its exact
+promises are in [its own section](#migrating-a-kubernetes-namespace).
 
 - **Installs nothing persistent.** One static binary. No service, daemon,
   scheduled task, registry key or background process. Delete the binary
@@ -24,11 +33,11 @@ Security teams usually ask these first:
   auto-update. Its only network traffic is to the AWS API endpoints or the SSH
   hosts you name, plus the komolos upload endpoint if, and only if, you run
   `--upload`.
-- **Changes nothing.** AWS mode uses only Describe, List and Get calls (a test
+- **`--collect` changes nothing.** AWS mode uses only Describe, List and Get calls (a test
   fails the build if the code and [`aws-iam-policy.json`](aws-iam-policy.json)
   ever disagree). SSH mode can only run the fixed keywords of a 130-line shell
   script you install yourself and can read.
-- **Reads no data.** No file contents, command lines, environment variables,
+- **`--collect` reads no data.** No file contents, command lines, environment variables,
   database rows or application payloads. Free-text fields are scrubbed of
   secret-looking strings before the file is written.
 - **Needs no inbound access.** You run it from inside your network. Nothing
@@ -210,6 +219,129 @@ KOMOLOS_UPLOAD_TOKEN=kup_... komolos-agent --upload -f inventory-aws.json
 The command shows the file's summary and SHA-256 and asks for confirmation
 (`--yes` skips it). The server records the same digest and the collector
 checks that it matches.
+
+## Migrating a Kubernetes namespace
+
+```sh
+komolos-agent --plan k8s    --from eks-prod --to lagos -n shop   # what would move; writes nothing
+komolos-agent --migrate k8s --from eks-prod --to lagos -n shop   # do it (asks for "yes")
+```
+
+`--from` and `--to` are kubectl contexts. komolos-agent runs your own `kubectl`
+with your kubeconfig, so EKS, GKE and AKS sign-in plugins, RBAC and audit logs
+all work unchanged, and every command is an ordinary kubectl command.
+
+### What it promises
+
+- **The source is only read.** Every command sent to the source context passes
+  a guard in the code that allows only `get`, `version`, `auth can-i` and an
+  `exec` of exactly two read commands it builds: `tar cf - -C <mount> .` to
+  stream a volume out, and a file-count check. Anything else is refused before
+  kubectl runs, and a test replays a whole migration to check that only reads
+  reached the source. Nothing on the source is scaled down, deleted or
+  labelled, so rolling back means doing nothing.
+- **It writes only to the destination context, in one namespace.** It creates
+  the namespace and its objects with server-side apply (field manager
+  `komolos-agent`), plus one temporary pod per volume (`komolos-restore-*`,
+  default image `busybox:1.36`) that receives the data and is deleted afterwards.
+- **It does not overwrite.** If the destination already has objects with the
+  same names, it stops and lists them, unless you pass `--overwrite`.
+- **It shows the plan first.** `--plan k8s` reads both clusters and prints what
+  will be created, what is deliberately left out and why, and what to check on
+  the destination. `--migrate` prints the same plan and waits for `yes`
+  (`--yes` skips the prompt).
+
+### What moves, and what does not
+
+Moved: ServiceAccounts, Roles, RoleBindings, ResourceQuotas, LimitRanges,
+ConfigMaps, Secrets,
+PersistentVolumeClaims and their data, Services, Deployments, StatefulSets,
+DaemonSets, CronJobs, Ingresses, HorizontalPodAutoscalers,
+PodDisruptionBudgets and NetworkPolicies, applied in that dependency order.
+Volume data is copied after the claims exist and before the workloads start.
+
+Left out, because the destination recreates them: Pods, ReplicaSets, Jobs,
+Endpoints, events, the `default` ServiceAccount, `kube-root-ca.crt` and
+service-account token Secrets. Fields that describe the source (UIDs, resource
+versions, cluster IPs, node ports, bound volume names, status) are removed.
+
+Changed on the way, so the copy is safe to run next to the source:
+
+- **CronJobs are created suspended** (and annotated
+  `komolos.io/suspended-for-cutover`), so a job never runs in both clusters.
+  One already suspended on the source stays suspended and is not marked.
+  Resume them at cutover (`kubectl patch cronjob <name> -p '{"spec":{"suspend":false}}'`),
+  or pass `--keep-cronjobs-active`.
+- **Ingress classes can be mapped**: `--ingress-class alb=nginx` rewrites
+  `ingressClassName` (and the older `kubernetes.io/ingress.class` annotation).
+- **Dual-stack fields and the load balancer class are dropped** from Services,
+  so a single-stack or non-AWS destination accepts them; it picks its own.
+- **Pod-security labels on the namespace are applied after the data copy**, so
+  a `restricted` namespace does not reject the temporary restore pod. The pod
+  also carries small resource requests and limits, so a ResourceQuota admits it.
+
+Flagged for you to check: images in Amazon ECR (the destination needs pull
+access), IAM roles for service accounts (IRSA), AWS load balancer and ALB
+annotations (no effect elsewhere), storage classes that do not exist on the
+destination (the default class is used unless you pass
+`--storage-class gp3=<class>`), LoadBalancer and NodePort services (new
+addresses, so update DNS at cutover) and pods pinned to source node names.
+
+It refuses to start when a claim would rely on a default storage class the
+destination does not have, because that claim would stay `Pending` forever;
+the error names the claim and the flag to pass. Claims with no class (common
+in StatefulSet templates) are mapped with `--storage-class default=<class>`.
+
+If the destination namespace already exists and enforces `restricted` pod
+security, the plan warns that the restore pod may be rejected: relax the label
+for the copy, or use `--skip-data`.
+
+### Limits
+
+- **Volume data is copied live**, from a running pod that mounts it, so it is
+  crash-consistent rather than transactionally consistent. The report compares
+  file count and total size on both sides and says `changed-during-copy` if the
+  app wrote during the copy. For databases, dump and restore, or stop writes
+  first.
+- **The source container needs `tar`** (and `sh`, `find`, `wc` for the check).
+  Most images have them; distroless images do not, and their volumes are
+  reported as not copied.
+- **A volume no running pod mounts is not copied**, because starting a helper
+  pod would write to the source. It is created empty and reported.
+- **Raw block volumes** (`volumeMode: Block`) are created but not copied; a
+  file copy cannot reproduce them. They are reported.
+- **Readiness** is checked by polling each workload until `--wait` (default
+  5m). Not-ready workloads are reported, not rolled back, and the exit code is 3.
+- **Custom resources** (CRDs and their objects) and cluster-scoped objects are
+  not moved yet.
+
+### Permissions
+
+Source: `get` and `list` on the kinds above and on pods, plus `create` on
+`pods/exec` (Kubernetes models exec as create, even for the read-only `tar`
+it runs). Destination: create and patch in the target namespace, and create
+namespaces if it does not exist yet.
+
+### Terminal output
+
+On an interactive terminal it shows the KOMOLOS banner, the plan, and one row
+per step: a live line (spinner, bytes and rate while a volume copies, replicas
+ready while a workload starts) that settles into a ✓, ! or ✗. Anything longer
+than a line goes to `report.json`. Piped or redirected output, CI logs,
+`NO_COLOR=1` and `TERM=dumb` get the same rows as plain text;
+`KOMOLOS_NO_BANNER=1` hides the logo.
+
+### Output
+
+A folder (`komolos-migration-<namespace>-<time>`, or `-o DIR`) with
+`manifests.json`, the exact objects applied (re-applicable with
+`kubectl apply -f`), and `report.json`: what was created, skipped and flagged,
+bytes and files per volume, and whether each workload became ready. The folder
+is owner-only because it contains the namespace's Secrets. The exit code is 0
+on success, 3 if it finished but something needs attention, 1 on error.
+
+A complete laptop demo with two local clusters is in
+[examples/kubernetes-migration](examples/kubernetes-migration/).
 
 ## Verifying a download by hand
 
